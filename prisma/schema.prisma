@@ -1,0 +1,358 @@
+// Prisma schema for Expense Tracker
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum AccountType {
+  BANK_ACCOUNT
+  CREDIT_CARD
+  E_WALLET
+  CASH
+  FINANCING
+}
+
+enum TransactionType {
+  EXPENSE
+  INCOME
+  TRANSFER
+  CARD_PAYMENT
+  REFUND
+  ADJUSTMENT
+}
+
+enum PaymentStatus {
+  PENDING
+  AMOUNT_REQUIRED
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  SKIPPED
+}
+
+/// Profile model linked 1:1 with Supabase auth.users using the same UUID.
+model Profile {
+  id                   String                @id @db.Uuid
+  fullName             String?
+  currency             String                @default("MYR")
+  monthlyNetIncome     Decimal?              @db.Decimal(12, 2)
+  salaryDay            Int?
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  accounts             Account[]
+  categories           Category[]
+  transactions         Transaction[]
+  commitments          Commitment[]
+  monthlyPayments      MonthlyPayment[]
+  wifeTransfers        WifeTransfer[]
+  installments         Installment[]
+  creditCardStatements CreditCardStatement[]
+  todos                Todo[]
+
+  @@map("profiles")
+}
+
+model Account {
+  id                      String                @id @default(uuid()) @db.Uuid
+  userId                  String                @db.Uuid
+  name                    String
+  institutionName         String?
+  type                    AccountType
+  lastFourDigits          String?
+  currentBalance          Decimal               @default(0) @db.Decimal(12, 2)
+  creditLimit             Decimal?              @db.Decimal(12, 2)
+  statementDay            Int?
+  dueDay                  Int?
+  active                  Boolean               @default(true)
+  createdAt               DateTime              @default(now())
+  updatedAt               DateTime              @updatedAt
+  user                    Profile               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Transactions where this account is the primary/source account.
+  transactions            Transaction[]         @relation("TransactionPrimaryAccount")
+  /// Transactions where this account is the destination (TRANSFER / CARD_PAYMENT only).
+  destinationTransactions Transaction[]         @relation("TransactionDestinationAccount")
+  commitments             Commitment[]
+  monthlyPayments         MonthlyPayment[]
+  wifeTransfers           WifeTransfer[]
+  installments            Installment[]
+  creditCardStatements    CreditCardStatement[]
+
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Category {
+  id               String           @id @default(uuid()) @db.Uuid
+  userId           String           @db.Uuid
+  name             String
+  essentialDefault Boolean          @default(false)
+  active           Boolean          @default(true)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  user             Profile          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Only EXPENSE transactions have a categoryId. Other types have null categoryId.
+  transactions     Transaction[]
+  commitments      Commitment[]
+  monthlyPayments  MonthlyPayment[]
+  installments     Installment[]
+
+  @@unique([userId, name])
+  @@index([userId])
+  @@map("categories")
+}
+
+/// Represents a financial transaction. All user-facing entries are typed.
+///
+/// Amount semantics: always stored as a positive value (amount > 0).
+/// Direction is inferred from `type`. EXPENSE subtracts; INCOME adds;
+/// TRANSFER and CARD_PAYMENT are fund movements; REFUND reduces net spending.
+///
+/// Field nullability by type:
+///   EXPENSE        — categoryId required,  destinationAccountId null, relatedTransactionId null
+///   INCOME         — categoryId null,       destinationAccountId null, relatedTransactionId null
+///   TRANSFER       — categoryId null,       destinationAccountId required, relatedTransactionId null
+///   CARD_PAYMENT   — categoryId null,       destinationAccountId required (CREDIT_CARD), relatedTransactionId null
+///   REFUND         — categoryId null,       destinationAccountId null, relatedTransactionId required (EXPENSE)
+model Transaction {
+  id                   String          @id @default(uuid()) @db.Uuid
+  userId               String          @db.Uuid
+  /// Primary / source account.
+  /// EXPENSE: account used to pay. INCOME: account receiving money.
+  /// TRANSFER: source account. CARD_PAYMENT: source bank/wallet. REFUND: account receiving refund.
+  accountId            String          @db.Uuid
+  /// Only required for EXPENSE. Null for all other types.
+  categoryId           String?         @db.Uuid
+  type                 TransactionType @default(EXPENSE)
+  /// Always positive. Direction is determined by type, not sign.
+  amount               Decimal         @db.Decimal(12, 2)
+  description          String
+  merchant             String?
+  /// Calendar date of the transaction (date-only, stored as midnight UTC).
+  transactionDate      DateTime        @db.Date
+  essential            Boolean         @default(false)
+  notes                String?
+  /// Destination account for TRANSFER and CARD_PAYMENT only. Null for all other types.
+  destinationAccountId String?         @db.Uuid
+  /// Self-reference for REFUND → original EXPENSE. Null for all other types.
+  relatedTransactionId String?         @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     Profile   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account  Account   @relation("TransactionPrimaryAccount", fields: [accountId], references: [id], onDelete: Cascade)
+  category Category? @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  /// Only set for TRANSFER and CARD_PAYMENT.
+  destinationAccount Account? @relation("TransactionDestinationAccount", fields: [destinationAccountId], references: [id], onDelete: SetNull)
+
+  /// Only set for REFUND — points to the original EXPENSE being refunded.
+  /// onDelete: Restrict enforced application-side (user-facing error before reaching DB).
+  relatedTransaction Transaction?  @relation("TransactionRefundRelation", fields: [relatedTransactionId], references: [id], onDelete: SetNull)
+  /// Refund transactions that reference this transaction as the original expense.
+  refundTransactions Transaction[] @relation("TransactionRefundRelation")
+
+  @@index([userId])
+  @@index([userId, transactionDate])
+  @@index([userId, type, transactionDate])
+  @@index([destinationAccountId])
+  @@index([relatedTransactionId])
+  @@map("transactions")
+}
+
+/// Recurring monthly commitment template. Does NOT create transaction rows or affect Dashboard V1 actual expenses.
+model Commitment {
+  id              String           @id @default(uuid()) @db.Uuid
+  userId          String           @db.Uuid
+  categoryId      String           @db.Uuid
+  accountId       String?          @db.Uuid
+  name            String
+  defaultAmount   Decimal          @db.Decimal(12, 2)
+  dueDay          Int
+  variableAmount  Boolean          @default(false)
+  transferToWife  Boolean          @default(false)
+  startDate       DateTime         @db.Date
+  endDate         DateTime?        @db.Date
+  active          Boolean          @default(true)
+  notes           String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  user            Profile          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category        Category         @relation(fields: [categoryId], references: [id])
+  account         Account?         @relation(fields: [accountId], references: [id])
+  monthlyPayments MonthlyPayment[]
+
+  @@index([userId])
+  @@index([userId, active])
+  @@index([categoryId])
+  @@index([accountId])
+  @@map("commitments")
+}
+
+/// Historical / monthly payment snapshot generated from a Commitment or Installment.
+model MonthlyPayment {
+  id             String        @id @default(uuid()) @db.Uuid
+  userId         String        @db.Uuid
+  commitmentId   String?       @db.Uuid
+  installmentId  String?       @db.Uuid
+  paymentYear    Int
+  paymentMonth   Int
+  plannedAmount  Decimal       @db.Decimal(12, 2)
+  actualAmount   Decimal?      @db.Decimal(12, 2)
+  dueDate        DateTime      @db.Date
+  paidDate       DateTime?     @db.Date
+  status         PaymentStatus @default(PENDING)
+  variableAmount Boolean       @default(false)
+  transferToWife Boolean       @default(false)
+  categoryId     String        @db.Uuid
+  accountId      String?       @db.Uuid
+  sourceName     String        @map("commitmentName")
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  user        Profile      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  commitment  Commitment?  @relation(fields: [commitmentId], references: [id])
+  installment Installment? @relation(fields: [installmentId], references: [id])
+  category    Category     @relation(fields: [categoryId], references: [id])
+  account     Account?     @relation(fields: [accountId], references: [id])
+
+  @@unique([userId, commitmentId, paymentYear, paymentMonth])
+  @@unique([userId, installmentId, paymentYear, paymentMonth])
+  @@index([userId])
+  @@index([userId, paymentYear, paymentMonth])
+  @@index([commitmentId])
+  @@index([installmentId])
+  @@index([status])
+  @@index([dueDate])
+  @@index([transferToWife])
+  @@map("monthly_payments")
+}
+
+/// Instalment template representing a finite recurring payment plan.
+/// remainingPayments is the authoritative count of full payments still outstanding.
+/// Calendar passage does NOT decrement it — only a completed MonthlyPayment will
+/// (in a future integration milestone).
+/// totalPayments is optional: set only when the original term is known.
+/// active = false means manually archived, NOT that all payments were completed.
+model Installment {
+  id         String  @id @default(uuid()) @db.Uuid
+  userId     String  @db.Uuid
+  categoryId String  @db.Uuid
+  accountId  String? @db.Uuid
+
+  name              String
+  /// Monthly instalment amount. Must be > 0.
+  monthlyAmount     Decimal @db.Decimal(12, 2)
+  /// Original total number of payments when known; null if unknown.
+  totalPayments     Int?
+  /// Authoritative remaining full-payment count. Starts at creation value.
+  /// FUTURE: will be decremented only when a linked MonthlyPayment is marked PAID.
+  /// NOTE: Once Installment-to-MonthlyPayment integration is implemented,
+  /// remainingPayments should no longer be casually edited through normal user CRUD
+  /// because completed payments will become the authoritative source of decrements.
+  remainingPayments Int
+
+  /// Day of month the instalment is due (1–31). Future generation will clamp to
+  /// month-end (e.g. dueDay=31 in Feb → 28th/29th) using the existing date helper.
+  dueDay    Int
+  /// The date/month from which this Instalment begins participating in this tracker.
+  /// Does NOT need to be the original loan/purchase commencement date.
+  startDate DateTime @db.Date
+
+  /// true = active; false = manually archived (not the same as completed).
+  active Boolean @default(true)
+  notes  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user            Profile          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category        Category         @relation(fields: [categoryId], references: [id])
+  account         Account?         @relation(fields: [accountId], references: [id])
+  monthlyPayments MonthlyPayment[]
+
+  @@index([userId])
+  @@index([userId, active])
+  @@index([categoryId])
+  @@index([accountId])
+  @@map("installments")
+}
+
+/// Records actual money transferred to wife for a given obligation month.
+model WifeTransfer {
+  id              String   @id @default(uuid()) @db.Uuid
+  userId          String   @db.Uuid
+  paymentYear     Int
+  paymentMonth    Int
+  amount          Decimal  @db.Decimal(12, 2)
+  transferDate    DateTime @db.Date
+  sourceAccountId String?  @db.Uuid
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user          Profile  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceAccount Account? @relation(fields: [sourceAccountId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([userId, paymentYear, paymentMonth])
+  @@index([transferDate])
+  @@index([sourceAccountId])
+  @@map("wife_transfers")
+}
+
+/// Historical credit card statement snapshot issued by card issuer.
+/// Represents billed amounts, due dates, minimum payments and notes.
+model CreditCardStatement {
+  id               String   @id @default(uuid()) @db.Uuid
+  userId           String   @db.Uuid
+  accountId        String   @db.Uuid
+  statementYear    Int
+  statementMonth   Int
+  statementDate    DateTime @db.Date
+  dueDate          DateTime @db.Date
+  statementBalance Decimal  @db.Decimal(12, 2)
+  minimumPayment   Decimal? @db.Decimal(12, 2)
+  notes            String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user    Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, accountId, statementYear, statementMonth])
+  @@index([userId])
+  @@index([accountId])
+  @@index([userId, accountId])
+  @@index([statementYear, statementMonth])
+  @@index([dueDate])
+  @@map("credit_card_statements")
+}
+
+/// Personal task item for the authenticated user. Fully isolated from financial domains.
+/// completed is the authoritative boolean state; overdue is derived at display time.
+/// completedAt is set when completed=true and cleared when reopened.
+model Todo {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @db.Uuid
+  title       String
+  description String?
+  /// Calendar date only — stored as midnight UTC. No time-of-day scheduling.
+  dueDate     DateTime? @db.Date
+  completed   Boolean   @default(false)
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, completed])
+  @@index([userId, dueDate])
+  @@map("todos")
+}
