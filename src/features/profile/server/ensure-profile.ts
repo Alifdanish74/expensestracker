@@ -1,27 +1,38 @@
 import { createClient as createSupabaseServerClient } from '@/lib/supabase/server'
 import { prisma } from '@/lib/prisma'
+import { getAuthenticatedUserId } from '@/lib/auth/get-current-user-id'
 import { ensureDefaultCategories } from './ensure-default-categories'
 
 /**
  * Ensures a Profile row exists in PostgreSQL linked 1:1 to the authenticated Supabase user.
- * Never accepts userId from frontend client inputs; derives identity strictly from verified server auth.
+ * Fast-path: checks indexed profile existence first. Only performs upsert and category seeding
+ * if the user profile or categories are uninitialized.
  */
-export async function ensureProfile() {
+export async function ensureProfile(inputUserId?: string) {
+  const userId = inputUserId ?? (await getAuthenticatedUserId())
+
+  // Fast-path: Existing profiles with categories return immediately in a single fast DB query
+  const existing = await prisma.profile.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      categories: { select: { id: true }, take: 1 },
+    },
+  })
+
+  if (existing && existing.categories.length > 0) {
+    return
+  }
+
   const supabase = await createSupabaseServerClient()
   const {
     data: { user },
-    error,
   } = await supabase.auth.getUser()
 
-  if (error || !user) {
-    throw new Error('Unauthorized: No valid Supabase authentication session.')
-  }
-
-  const userId = user.id
   const fullName =
-    user.user_metadata?.full_name ||
-    user.user_metadata?.name ||
-    user.email?.split('@')[0] ||
+    user?.user_metadata?.full_name ||
+    user?.user_metadata?.name ||
+    user?.email?.split('@')[0] ||
     'User'
 
   // Profile.id is identical to Supabase auth.users.id
@@ -43,3 +54,4 @@ export async function ensureProfile() {
     categories,
   }
 }
+

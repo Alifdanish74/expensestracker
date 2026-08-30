@@ -1,12 +1,13 @@
+import { cache } from 'react'
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 
 /**
  * Returns the verified Supabase user ID for the current request context.
- * Always derive ownership from this server-verified session ID rather than browser inputs.
- * Redirects to /login if no valid authenticated user session exists.
+ * Wrapped in React cache() so multiple calls during a single request (RSC or action)
+ * execute the underlying Supabase Auth check ONCE and return the memoized ID instantly.
  */
-export async function getAuthenticatedUserId(): Promise<string> {
+export const getAuthenticatedUserId = cache(async (): Promise<string> => {
   const supabase = await createClient()
   const {
     data: { user },
@@ -18,5 +19,6 @@ export async function getAuthenticatedUserId(): Promise<string> {
   }
 
   return user.id
-}
+})
+
 

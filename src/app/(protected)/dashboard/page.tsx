@@ -28,7 +28,8 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
 
   try {
     summary = await getDashboardSummary(monthParam)
-  } catch {
+  } catch (error) {
+    console.error('Failed to load dashboard summary:', error)
     loadError = 'Unable to load dashboard summary. Please refresh.'
   }
 

@@ -1,6 +1,7 @@
 import 'server-only'
 import { prisma } from '@/lib/prisma'
 import { getAuthenticatedUserId } from '@/lib/auth/get-current-user-id'
+import { ensureProfile } from '@/features/profile/server/ensure-profile'
 import { parseMonthParam, getMonthBounds } from '@/features/transactions/server/transaction-service'
 import { isPaymentOverdue, getTodayDateString } from '@/features/payments/utils/payment-status-utils'
 import { getWifeTransferSummary } from '@/features/wife-transfers/server/wife-transfer-service'
@@ -44,8 +45,10 @@ function resolveMonth(monthParam: string): { year: number; month: number; resolv
  */
 export async function getDashboardSummary(monthParam: string): Promise<DashboardV2Summary> {
   const userId = await getAuthenticatedUserId()
+  await ensureProfile(userId)
 
   const { year, month, resolved } = resolveMonth(monthParam)
+
   const { start, end } = getMonthBounds(year, month)
   const todayStr = getTodayDateString()
 
