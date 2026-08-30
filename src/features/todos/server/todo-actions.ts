@@ -1,14 +1,43 @@
 'use server'
 
 import { redirect } from 'next/navigation'
-import { createTodo, updateTodo, deleteTodo, setTodoCompleted } from './todo-service'
+import { revalidatePath } from 'next/cache'
+import { createTodo, updateTodo, deleteTodo, setTodoCompleted, getTodos, type TodosResult } from './todo-service'
 import type { TodoFormValues } from '../schemas/todo-schema'
 
 export type TodoActionResult =
   | { success: true }
   | { success: false; error: string }
 
+// ── Fetch ─────────────────────────────────────────────────────────────────────
+
+export async function getTodosAction(): Promise<
+  { success: true; data: TodosResult } | { success: false; error: string }
+> {
+  try {
+    const data = await getTodos()
+    return { success: true, data }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Unable to fetch todos.'
+    return { success: false, error: message }
+  }
+}
+
 // ── Create ────────────────────────────────────────────────────────────────────
+
+/**
+ * Creates a new Todo without redirecting, suitable for modal dialogs and floating widgets.
+ */
+export async function createTodoModalAction(input: TodoFormValues): Promise<TodoActionResult> {
+  try {
+    await createTodo(input)
+    revalidatePath('/', 'layout')
+    return { success: true }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Unable to add todo. Please try again.'
+    return { success: false, error: message }
+  }
+}
 
 /**
  * Creates a new Todo and redirects to /todos.
@@ -23,6 +52,7 @@ export async function createTodoAction(input: TodoFormValues): Promise<TodoActio
   }
   redirect('/todos')
 }
+
 
 // ── Update ────────────────────────────────────────────────────────────────────
 
