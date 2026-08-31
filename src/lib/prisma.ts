@@ -19,9 +19,9 @@ function createPrismaClient(): InstanceType<typeof PrismaClient> {
     globalForPrisma.pool ??
     new Pool({
       connectionString,
-      max: 5, // Strict limit for Supabase session mode (max 15 pool size)
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 5000,
+      max: 2, // 1-2 connections per serverless worker thread
+      idleTimeoutMillis: 1000, // Release idle connection back to pooler after 1 second
+      connectionTimeoutMillis: 10000,
       ssl: connectionString.includes('supabase.co') || connectionString.includes('sslmode=')
         ? { rejectUnauthorized: false }
         : undefined,
