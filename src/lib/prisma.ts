@@ -22,6 +22,9 @@ function createPrismaClient(): InstanceType<typeof PrismaClient> {
       max: 5, // Strict limit for Supabase session mode (max 15 pool size)
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 5000,
+      ssl: connectionString.includes('supabase.co') || connectionString.includes('sslmode=')
+        ? { rejectUnauthorized: false }
+        : undefined,
     })
 
   const adapter = new PrismaPg(pool)
